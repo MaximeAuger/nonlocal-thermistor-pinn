@@ -2,6 +2,21 @@
 
 > A benchmark of Physics-Informed Neural Networks (PINN) and Variational PINNs (VPINN) on the steady **non-local thermistor problem**: a nonlinear elliptic equation whose source term depends on an integral of the unknown, with an exact solution, a sharp existence threshold ($\lambda^\ast = 8$) and thermal runaway beyond it. To our knowledge (non-exhaustive literature search, November 2026), no PINN or VPINN study of this problem has been published.
 
+## Key Findings
+
+Why a 1D problem with a known solution? Because it has a ground truth **and** a sharp threshold beyond which no solution exists, so it shows what PINNs and VPINNs do when the physics says "impossible".
+
+1. **A low training loss proves nothing.** With too few test functions (K ≤ 20), the VPINN reaches a loss of 10⁻¹⁶ on problems that have *no solution* (up to λ ≈ 8.75). This is reproducible across seeds and survives 4× longer training. An a-posteriori residual on an enriched test space detects it at the cost of one evaluation.
+2. **Near the threshold, a well-resolved VPINN wins.** At λ = 7.9 it is about 100× more accurate than the PINN (65× median, 165× mean over 5 seeds). At λ = 7.99 it still reaches $L^2 = 10^{-2}$ with a larger budget and a finer quadrature; the PINN stays at $L^2 \approx 1$. Away from the threshold (λ ≤ 7) both are equivalent (~10⁻⁶).
+3. **The critical value can be recovered from where no solution exists.** The VPINN residual floor grows linearly beyond λ\*. Extrapolating it from 5 values of λ in [8.1, 8.5] gives λ\* within 0.1 % of 8 for every seed and architecture tested (within 0.2 % from only 3 values).
+4. **The non-local term acts as a free continuation.** The equivalent local problem fails near the threshold unless it is trained with an explicit continuation; the integral normalisation provides one automatically.
+
+<p align="center">
+  <img src="results/fig3_lambda_sweep.png" width="85%" alt="Sweep across the existence threshold">
+</p>
+
+*Left to right, top to bottom: training residual, a-posteriori residual, max u, and the linear extrapolation of the post-critical floor that recovers λ\* = 8. Details, limits and every number below.*
+
 ---
 
 ## Problem Statement
