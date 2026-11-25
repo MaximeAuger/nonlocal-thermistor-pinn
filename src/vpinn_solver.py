@@ -28,30 +28,37 @@ Author: Maxime Auger, Dept. of Applied Mechanics, FEMTO-ST Institute, ENSMM
 
 import torch
 
-from exact_solution import mu_local, DTYPE
-from utils import (COMMON_DEFAULTS, gauss_legendre, LegendreTestFunctions, diff,
-                   to_t, build_net, train_loop, evaluate, DEVICE)
+import numpy as np
 
-DEFAULT_CONFIG = {**COMMON_DEFAULTS, "n_test": 20}
+from exact_solution import DTYPE
+from utils import (COMMON_DEFAULTS, gauss_legendre, LegendreTestFunctions, diff,
+                   to_t, build_net, train_loop, evaluate, DEVICE, LocalCoefficient)
+
+# normalize_tests: divide v_k by ||v_k'||_L2 = 2 sqrt(2k+1), so that the loss is
+# the (truncated) H^{-1} norm of the residual; default False = plain v_k.
+DEFAULT_CONFIG = {**COMMON_DEFAULTS, "n_test": 20, "normalize_tests": False}
 
 
 def make_loss(cfg):
     xq, wq = gauss_legendre(cfg["n_quad"])
     tf = LegendreTestFunctions(cfg["n_test"])
-    V = torch.tensor(tf.eval_v(xq), dtype=DTYPE, device=DEVICE)     # (Nq, K)
-    dV = torch.tensor(tf.eval_dv(xq), dtype=DTYPE, device=DEVICE)   # (Nq, K)
+    scale = 1.0
+    if cfg.get("normalize_tests"):
+        scale = 1.0 / (2.0 * np.sqrt(2.0 * np.arange(1, cfg["n_test"] + 1) + 1.0))
+    V = torch.tensor(tf.eval_v(xq) * scale, dtype=DTYPE, device=DEVICE)     # (Nq, K)
+    dV = torch.tensor(tf.eval_dv(xq) * scale, dtype=DTYPE, device=DEVICE)   # (Nq, K)
     x = to_t(xq).requires_grad_(True)
     w = to_t(wq)
     lam = cfg["lam"]
     local = cfg["problem"] == "local"
-    mu = mu_local(lam) if local else None
+    coef_local = LocalCoefficient(cfg) if local else None
 
     def loss_fn(net):
         u = net(x)
         u_x = diff(u, x, order=1)
         e = torch.exp(-u)
         I = torch.sum(w * e)
-        coef = mu if local else lam / I ** 2
+        coef = coef_local() if local else lam / I ** 2
         stiff = (w * u_x).T @ dV            # (1, K)  int u' v_k'
         load = coef * ((w * e).T @ V)       # (1, K)  coef * int e^{-u} v_k
         R = stiff - load
@@ -60,6 +67,8 @@ def make_loss(cfg):
             rel = float(torch.sqrt(loss / torch.sum(load ** 2)))
         return loss, {"I": float(I), "rel_res": rel}
 
+    if local:
+        loss_fn.set_iter = coef_local.set_iter
     return loss_fn
 
 

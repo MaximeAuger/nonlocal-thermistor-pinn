@@ -118,7 +118,35 @@ COMMON_DEFAULTS = {
     "n_lbfgs": 2_000,       # max L-BFGS function evaluations
     "seed": 0,
     "log_every": 50,
+    # --- options used by the robustness study (defaults = behaviour of run_all.py) ---
+    "lr_end": None,           # if set: exponential Adam decay lr_adam -> lr_end over n_adam
+    "collocation": "gauss",   # PINN residual points: "gauss" (= quadrature nodes), "uniform", "random"
+    "n_col": None,            # number of PINN collocation points (default n_quad)
+    "mu_ramp": 0,             # local problem only: geometric ramp lambda -> mu over mu_ramp Adam steps
 }
+
+
+class LocalCoefficient:
+    """Coefficient of the local problem -u'' = mu_eff exp(-u).
+
+    Without ramp: mu_eff = mu = lambda / I_exact^2.  With cfg["mu_ramp"] = R > 0,
+    mu_eff grows geometrically from lambda (the non-local coefficient at u = 0,
+    where I = 1) to mu over the first R Adam steps: an explicit continuation.
+    """
+
+    def __init__(self, cfg):
+        from exact_solution import mu_local
+        self.lam, self.mu, self.ramp = cfg["lam"], mu_local(cfg["lam"]), cfg.get("mu_ramp", 0)
+        self.it = 10 ** 9
+
+    def set_iter(self, it):
+        self.it = it
+
+    def __call__(self):
+        if self.ramp <= 0:
+            return self.mu
+        t = min(1.0, self.it / self.ramp)
+        return self.lam * (self.mu / self.lam) ** t
 
 
 def build_net(cfg):
@@ -167,7 +195,14 @@ def train_loop(net, loss_fn, cfg, tag="", verbose=False):
 
     # ---- Phase 1: Adam ----
     opt = torch.optim.Adam(params, lr=cfg["lr_adam"])
+    sched = None
+    if cfg.get("lr_end"):
+        gamma = (cfg["lr_end"] / cfg["lr_adam"]) ** (1.0 / max(1, cfg["n_adam"]))
+        sched = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=gamma)
+    set_iter = getattr(loss_fn, "set_iter", None)
     for ep in range(cfg["n_adam"]):
+        if set_iter:
+            set_iter(ep)
         opt.zero_grad()
         loss, aux = loss_fn(net)
         lv = loss.item()
@@ -178,10 +213,14 @@ def train_loop(net, loss_fn, cfg, tag="", verbose=False):
         record(lv, aux)
         loss.backward()
         opt.step()
+        if sched:
+            sched.step()
         if verbose and (ep + 1) % 1000 == 0:
             print(f"  {tag} Adam {ep+1:6d}  loss={lv:.3e}  rel_res={aux['rel_res']:.2e}  I={aux['I']:.4e}")
 
-    # ---- Phase 2: L-BFGS ----
+    # ---- Phase 2: L-BFGS (any continuation ramp is complete from here on) ----
+    if set_iter:
+        set_iter(10 ** 9)
     if status == "ok" and cfg["n_lbfgs"] > 0:
         opt2 = torch.optim.LBFGS(params, lr=1.0, max_iter=cfg["n_lbfgs"],
                                  max_eval=cfg["n_lbfgs"], history_size=50,

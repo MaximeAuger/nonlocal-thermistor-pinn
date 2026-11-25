@@ -70,6 +70,27 @@ def test_validation_residuals_vanish_on_exact_solution(lam):
     assert m["L2"] < 1e-12 and m["I_rel"] < 1e-12
 
 
+@pytest.mark.parametrize("extra", [{"collocation": "uniform"}, {"collocation": "random", "n_col": 300},
+                                   {"normalize_tests": True}])
+def test_loss_options_vanish_on_exact_solution(extra):
+    for mod in (pinn_solver, vpinn_solver):
+        cfg = {**mod.DEFAULT_CONFIG, "lam": 6.0, **extra}
+        _, aux = mod.make_loss(cfg)(ExactNet(6.0))
+        assert aux["rel_res"] < 1e-9, (mod.__name__, extra, aux)
+
+
+def test_mu_ramp_schedule():
+    from utils import LocalCoefficient
+    from exact_solution import mu_local
+    c = LocalCoefficient({"lam": 7.0, "mu_ramp": 100})
+    c.set_iter(0)
+    assert abs(c() - 7.0) < 1e-12
+    c.set_iter(100)
+    assert abs(c() - mu_local(7.0)) < 1e-9
+    c.set_iter(50)
+    assert abs(c() - (7.0 * mu_local(7.0)) ** 0.5) < 1e-9
+
+
 @pytest.mark.parametrize("problem", ["nonlocal", "local"])
 @pytest.mark.parametrize("lam", [1.0, 6.0])
 def test_losses_vanish_on_exact_solution(problem, lam):

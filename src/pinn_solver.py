@@ -24,33 +24,52 @@ Author: Maxime Auger, Dept. of Applied Mechanics, FEMTO-ST Institute, ENSMM
 import numpy as np
 import torch
 
-from exact_solution import mu_local
-from utils import COMMON_DEFAULTS, gauss_legendre, diff, to_t, build_net, train_loop, evaluate
+from utils import (COMMON_DEFAULTS, gauss_legendre, diff, to_t, build_net, train_loop, evaluate,
+                   LocalCoefficient)
 
 DEFAULT_CONFIG = dict(COMMON_DEFAULTS)
 
 
+def collocation_points(cfg):
+    """Residual points: the Gauss nodes (default), a uniform grid or fixed random points."""
+    n = cfg.get("n_col") or cfg["n_quad"]
+    kind = cfg.get("collocation", "gauss")
+    if kind == "gauss":
+        return gauss_legendre(n)[0]
+    if kind == "uniform":
+        return np.linspace(0.0, 1.0, n + 2)[1:-1]
+    if kind == "random":
+        return np.sort(np.random.default_rng(1000 + cfg["seed"]).uniform(0.0, 1.0, n))
+    raise ValueError(kind)
+
+
 def make_loss(cfg):
     xq, wq = gauss_legendre(cfg["n_quad"])
-    x = to_t(xq).requires_grad_(True)
     w = to_t(wq)
+    same = cfg.get("collocation", "gauss") == "gauss" and not cfg.get("n_col")
+    x = to_t(xq).requires_grad_(True)
+    xc = x if same else to_t(collocation_points(cfg)).requires_grad_(True)
     lam = cfg["lam"]
     local = cfg["problem"] == "local"
-    mu = mu_local(lam) if local else None
+    coef_local = LocalCoefficient(cfg) if local else None
 
     def loss_fn(net):
         u = net(x)
-        u_xx = diff(u, x, order=2)
         e = torch.exp(-u)
-        I = torch.sum(w * e)
-        coef = mu if local else lam / I ** 2
-        s = coef * e
+        I = torch.sum(w * e)                      # always on the Gauss rule
+        uc = u if same else net(xc)
+        u_xx = diff(uc, xc, order=2)
+        ec = e if same else torch.exp(-uc)
+        coef = coef_local() if local else lam / I ** 2
+        s = coef * ec
         r = -u_xx - s
         loss = torch.mean(r ** 2)
         with torch.no_grad():
             rel = float(torch.sqrt(loss / torch.mean(s ** 2)))
         return loss, {"I": float(I), "rel_res": rel}
 
+    if local:
+        loss_fn.set_iter = coef_local.set_iter
     return loss_fn
 
 
