@@ -4,11 +4,11 @@
 
 ## Key Findings
 
-Why a 1D problem with a known solution? Because it has a ground truth **and** a sharp threshold beyond which no solution exists, so it shows what PINNs and VPINNs do when the physics says "impossible".
+Why a 1D problem with a known solution? Because it has a ground truth **and** a sharp threshold beyond which no solution exists, so it shows what PINNs and VPINNs do when the physics says "impossible". It is a diagnostic benchmark, not a case for using networks here: a classical finite-difference + Newton solver is 10³–10⁴× faster at comparable accuracy (see *Classical baselines*).
 
-1. **A low training loss proves nothing.** With too few test functions (K ≤ 20), the VPINN reaches a loss of 10⁻¹⁶ on problems that have *no solution* (up to λ ≈ 8.75). This is reproducible across seeds and survives 4× longer training. An a-posteriori residual on an enriched test space detects it at the cost of one evaluation.
+1. **A low training loss proves nothing.** With too few test functions (K ≤ 20), the VPINN reaches a loss of 10⁻¹⁶ on problems that have *no solution* (up to λ ≈ 8.75). These are genuine solutions of the K-mode Galerkin problem, whose existence threshold jumps from above 20 (K ≤ 20) to 8.00–8.05 (K ≥ 25). An a-posteriori residual on an enriched test space detects them at the cost of one evaluation.
 2. **Near the threshold, a well-resolved VPINN wins.** At λ = 7.9 it is about 100× more accurate than the PINN (65× median, 165× mean over 5 seeds). At λ = 7.99 it still reaches $L^2 = 10^{-2}$ with a larger budget and a finer quadrature; the PINN stays at $L^2 \approx 1$. Away from the threshold (λ ≤ 7) both are equivalent (~10⁻⁶).
-3. **The critical value can be recovered from where no solution exists.** The VPINN residual floor grows linearly beyond λ\*. Extrapolating it from 5 values of λ in [8.1, 8.5] gives λ\* within 0.1 % of 8 for every seed and architecture tested (within 0.2 % from only 3 values).
+3. **The critical value can be recovered from where no solution exists.** The VPINN residual floor grows linearly beyond λ\*. Extrapolating it from 5 values of λ in [8.1, 8.5] gives λ\* within 0.1 % of 8 for every seed and architecture tested (within 0.2 % from only 3 values). This floor is exactly the least-squares floor of the 60-mode Galerkin problem (0.01 % agreement): it is a property of the weak formulation, which the network reproduces. A finite-difference discretisation, in contrast, has solutions for every λ at fixed resolution and only reveals non-existence under grid refinement.
 4. **The non-local term acts as a free continuation.** The equivalent local problem fails near the threshold unless it is trained with an explicit continuation; the integral normalisation provides one automatically.
 
 <p align="center">
@@ -305,13 +305,58 @@ The threshold depends only **weakly** on network size. A 15× larger network shi
 
 ---
 
+### Classical baselines and mechanism
+
+`python src/study_classical.py` (40 s; full tables in [`results/classical_summary.md`](results/classical_summary.md)). Two non-neural references, implemented in [`src/classical_solver.py`](src/classical_solver.py) and tested in [`tests/test_classical.py`](tests/test_classical.py):
+
+- **Finite differences + Newton.** Second-order centred differences and a trapezoidal rule for $I$. The integral makes the Jacobian *tridiagonal + rank one*, so each Newton step costs $O(N)$ (banded solve + Sherman–Morrison).
+- **Square Galerkin least squares.** Spectral ansatz $u = x(1-x)\sum_{j<M} a_j P_j(2x-1)$ with $M = K$ coefficients, the *same* test functions and quadrature as the VPINN, and no network. It minimises $\sum_k R_k^2$ with a trust-region least-squares solver.
+
+<p align="center">
+  <img src="results/fig8_classical.png" width="100%" alt="Classical baselines">
+</p>
+
+**C1 — Cost.** Finite differences on a uniform grid:
+
+| λ | N = 800 | N = 3 200 | N = 12 800 | best network (mean of 3 seeds) |
+|---|---|---|---|---|
+| 7 | 1.8 × 10⁻⁴ (0.4 ms) | 1.1 × 10⁻⁵ (1.0 ms) | 7.0 × 10⁻⁷ (5.5 ms) | VPINN K=60: 2.6 × 10⁻⁶ (26 s) |
+| 7.9 | 3.0 × 10⁻² (0.7 ms) | 2.0 × 10⁻³ (1.5 ms) | 1.2 × 10⁻⁴ (12 ms) | VPINN K=60: 5.3 × 10⁻⁵ (25 s) |
+| 7.99 | 0.86 (0.8 ms) | 0.17 (2.2 ms) | 1.4 × 10⁻² (21 ms) | VPINN K=60, 4× budget: 1.0 × 10⁻² (137 s) |
+
+At comparable accuracy, the classical solver is **10³–10⁴× faster**, even on a uniform grid; a graded mesh would widen the gap. Amplitude continuation ($u(1/2) = m$ prescribed, λ unknown) traces $\lambda(m) \to 8$ in 26 ms. With Richardson extrapolation it is accurate to 10⁻⁸ at $m = 6$ and to 4 × 10⁻⁵ at $m = 10$ (λ = 7.9997).
+
+**C3 — The VPINN floor is the Galerkin floor.** Minimum relative weak residual:
+
+| λ | 8.0 | 8.05 | 8.1 | 8.3 | 8.5 | 9.0 |
+|---|---|---|---|---|---|---|
+| Galerkin K = M = 60 (no network) | 10⁻¹⁵ | 9.73 × 10⁻³ | 1.951 × 10⁻² | 5.849 × 10⁻² | 9.688 × 10⁻² | 0.1897 |
+| VPINN K = 60, training floor | 2.3 × 10⁻³ | 9.81 × 10⁻³ | 1.951 × 10⁻² | 5.849 × 10⁻² | 9.688 × 10⁻² | 0.1897 |
+
+The two agree to **0.01 %** on [8.1, 9.0], and the Galerkin floor is the same for K = 30 and 60. The floor of criterion B is therefore a property of the projected weak problem, which the network reaches exactly. A Galerkin least-squares solve (a fraction of a second per λ, no network) gives the same extrapolated λ\* = 7.998.
+
+**C3 — Existence threshold of the K-mode problem.** This is the mechanism behind the spurious solutions:
+
+| K | 10 | 15 | 20 | 25 | 30 | 40 | 60 |
+|---|---|---|---|---|---|---|---|
+| discrete threshold λ*_K | > 20 | > 20 | > 20 | 8.05 | 8.05 | 8.05 | 8.00 |
+
+- For K ≤ 20, the discrete weak problem has solutions far beyond the continuous threshold. At λ = 8.3, the K = 20 discrete solution has $\max u = 8.9$ and puts 100 % of its residual in modes k > 20, exactly like the spurious VPINN runs.
+- The threshold collapses to ≈ 8 between K = 20 and K = 25, where R2 and R9 placed the transition.
+- An *over-parameterised* polynomial ansatz (M = 80 > K) zeroes the weak residual for every λ tested (C4). The network does not find those polynomial solutions, presumably because of its bias towards smooth functions.
+
+**C5 — Finite differences do not see non-existence either.** At fixed N, Newton converges at λ = 8 and 9: at λ = 9, $\max u$ = 7.2, 9.9 and 12.7 for N = 200, 800 and 3 200. Along the amplitude branch, $\lambda_N(m)$ passes 8 and then grows without bound (N = 800: λ = 15 000 at m = 20). Non-existence appears only as **non-convergence under refinement**, so every discretisation needs a check beyond a single residual: refinement for finite differences, an enriched test space for the VPINN.
+
+---
+
 ## Conclusions
 
 1. **Away from the threshold (λ ≤ 7)** PINN and VPINN are equivalent in $L^2$ (~10⁻⁶). The PINN is slightly better in $H^1$ for λ ≥ 6 and the VPINN better on $I[u]$. The non-local integral, recomputed and differentiated at each iteration, adds no accuracy penalty.
 2. **Near the threshold (λ = 7.9)** a VPINN with a rich enough test space (K ≥ 40) is about 2 orders of magnitude more accurate than the PINN (65× in median, 165× in mean over 5 seeds). With K = 20 it is *worse* than the PINN. At λ = 7.99 all methods fail with the default budget. With 4× the iterations and 256 quadrature points, the VPINN with K = 60 reaches $L^2 = 10^{-2}$ while the PINN stays at ~1.
-3. **The VPINN training loss is not a reliable indicator.** With too few test functions (K ≤ 20 here) it reaches 10⁻¹⁶ for problems that have **no solution** (up to λ ≈ 8.75). This is structural: it is reproduced on 5/5 seeds, survives 4× longer training, and depends only weakly on network size. Near the threshold the training loss is anti-correlated with accuracy. An a-posteriori residual on an enriched test space ($H^{-1}$ norm, 150 modes) fixes this and costs one evaluation.
+3. **The VPINN training loss is not a reliable indicator.** With too few test functions (K ≤ 20 here) it reaches 10⁻¹⁶ for problems that have **no solution** (up to λ ≈ 8.75). This is structural: it is reproduced on 5/5 seeds, survives 4× longer training, and depends only weakly on network size. Near the threshold the training loss is anti-correlated with accuracy. An a-posteriori residual on an enriched test space ($H^{-1}$ norm, 150 modes) fixes this and costs one evaluation. The mechanism is classical: these are genuine solutions of the K-mode Galerkin problem, whose existence threshold exceeds 20 for K ≤ 20 and collapses to ≈ 8 for K ≥ 25.
 4. **Detecting non-existence:** a residual threshold locates λ\* only to ~0.1 (smooth transition). Linearly extrapolating the post-critical floor of a well-resolved VPINN (K ≥ 60) from 5 points in [8.1, 8.5] gives **λ\* within 0.1 % of 8** for every seed and architecture tested, with a built-in acceptance test (linearity deviation < 5 %). Three points within 0.3 of the threshold suffice (error ≤ 0.2 %). The PINN estimate is equally reproducible but biased by 0.6–0.9 %. Separately, a $\max u$ that keeps growing at the end of training marks λ\* itself (blow-up).
 5. **The non-local term acts as a free continuation.** The equivalent local problem ($\mu = \lambda/I^2$) fails for λ ≥ 7.5 with a plain schedule, but converges with an explicit continuation in μ. The local problem is therefore not intrinsically harder: the self-normalising integral provides the continuation automatically.
+6. **Classical methods remain far cheaper, and none is immune.** Finite differences + Newton are 10³–10⁴× faster at comparable accuracy. The criterion-B floor is a property of the weak formulation: a Galerkin least-squares solve without any network gives the same λ\*. At fixed resolution, finite differences find solutions for every λ, and non-existence shows only under refinement. What this benchmark shows about networks is diagnostic: how a VPINN fails, why, and how to check it.
 
 ### Limitations
 
@@ -319,7 +364,8 @@ The threshold depends only **weakly** on network size. A 15× larger network shi
 - 2–5 seeds per configuration. The PINN at λ = 7.9 shows a large seed-to-seed spread.
 - The spurious-solution threshold was mapped for depth 4 and widths 16–64 only, with one quadrature (128 nodes).
 - Times are wall-clock times of single-threaded runs executed 10 at a time; use them only for relative comparisons.
-- The linearity behind criterion B is empirical, observed for one non-linearity $f(u) = e^{-u}$ in 1D.
+- The linearity behind criterion B is reproduced by the Galerkin least-squares floor, but is not proven, and was observed for one non-linearity $f(u) = e^{-u}$ in 1D.
+- The finite-difference baseline uses a uniform grid; a graded mesh would make it faster still.
 - The optional 2D extension was not done.
 
 ---
@@ -338,10 +384,13 @@ The threshold depends only **weakly** on network size. A 15× larger network shi
 │   ├── pinn_solver.py       # strong-form loss
 │   ├── vpinn_solver.py      # weak-form loss
 │   ├── run_all.py           # E1–E4: all tables and figures
-│   └── study_robustness.py  # R1–R9 robustness checks (needs run_all.py first)
+│   ├── study_robustness.py  # R1–R9 robustness checks (needs run_all.py first)
+│   ├── classical_solver.py  # finite differences + Newton, amplitude continuation, Galerkin least squares
+│   └── study_classical.py   # C1–C5 classical baselines and mechanism
 ├── tests/
 │   ├── test_exact_solution.py   # sympy residual, λ = 8 sin²(b/2), runaway
-│   └── test_quadrature.py       # Gauss rules, test functions, losses (and options) vanish on the exact solution
+│   ├── test_quadrature.py       # Gauss rules, test functions, losses (and options) vanish on the exact solution
+│   └── test_classical.py        # FD Jacobian and O(h²) convergence, amplitude continuation, Galerkin least squares
 ├── notebooks/
 │   └── colab_quick_run.ipynb    # short version for Google Colab
 └── results/                     # figures, CSV tables, results_summary.md
@@ -351,10 +400,11 @@ The threshold depends only **weakly** on network size. A 15× larger network shi
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests -q              # 43 tests, ~6 s
+python -m pytest tests -q              # 49 tests, ~7 s
 cd src
 python run_all.py                      # full benchmark, ~20 min on 10 CPU processes (results/)
 python study_robustness.py             # robustness checks R1-R9, ~25 min (results/robustness_summary.md)
+python study_classical.py              # classical baselines C1-C5, ~40 s (results/classical_summary.md)
 python run_all.py --quick              # short version, ~2 min on 10 processes (results_quick/)
 python run_all.py --only E2 --nproc 4  # one experiment; raw runs are cached in results/raw/
 ```
