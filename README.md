@@ -90,7 +90,7 @@ Mean time per training (single thread, 10 runs in parallel): PINN ≈ 36 s, VPIN
 - The VPINN computes $I[u]$ 20× more accurately at small λ (relative error 5 × 10⁻⁸ vs 1.3 × 10⁻⁶ at λ = 1).
 - **Where the VPINN loses:** the PINN has the best $H^1$ error for $6 \le \lambda \le 7.5$. At $\lambda = 7.5$, the VPINN with K = 20 is 8× worse in $L^2$ and 170× worse in $H^1$ (oscillations near the boundary layers). At $\lambda = 7.9$, the VPINN with K = 20 is also worse than the PINN.
 - Close to the threshold ($\lambda = 7.9$, $u'(0) = 52$), the VPINN with K = 60 is about **two orders of magnitude more accurate** than the PINN. Over 5 seeds (robustness check R4), the median L2 is $4.9 \times 10^{-5}$ vs $3.2 \times 10^{-3}$ (65×) and the mean is $8.6 \times 10^{-5}$ vs $1.4 \times 10^{-2}$ (165×). The PINN result also varies strongly between seeds ($2.5 \times 10^{-3}$ to $4.4 \times 10^{-2}$).
-- At $\lambda = 7.99$ ($\max u = 6.7$, $u'(0) = 174$) **every method fails** with this budget and network ($L^2 \ge 0.49$).
+- At $\lambda = 7.99$ ($\max u = 6.7$, $u'(0) = 174$) **every method fails** with the default budget ($L^2 \ge 0.49$). Robustness check R6 shows that this is a budget-and-quadrature limit for the VPINN but not for the PINN.
 
 ### E2 — Non-existence (λ ≥ 8): can the loss floor detect it?
 
@@ -184,7 +184,7 @@ The same exact solution also solves the **local** problem $-u'' = \mu e^{-u}$ wi
 
 ### Robustness checks
 
-`python src/study_robustness.py` (15 min, 300 trainings; full tables in [`results/robustness_summary.md`](results/robustness_summary.md)) tests whether the main claims survive more seeds, longer training and fairer settings.
+`python src/study_robustness.py` (~25 min, ~440 trainings; full tables in [`results/robustness_summary.md`](results/robustness_summary.md)) tests whether the main claims survive more seeds, longer training and fairer settings.
 
 <p align="center">
   <img src="results/fig6_robustness.png" width="100%" alt="Robustness checks R1, R2, R5">
@@ -239,21 +239,70 @@ The phenomenon is **structural**: it is reproducible over seeds and survives 4×
 - The PINN estimates are equally reproducible but biased: −0.65 % with ρ_weak, +0.9 % with the training residual.
 - One K = 40 run picked up a partially spurious solution at λ = 8.1, which broke the fit. It is caught by a simple **acceptance test**: reject fits whose points deviate from the line by more than 5 %. All other fits deviate by at most 4.2 %.
 
+<p align="center">
+  <img src="results/fig7_followups.png" width="95%" alt="Follow-up checks R6 to R9">
+</p>
+
+**R6 — Can λ = 7.99 be solved?** (3 seeds, L2 mean ± std)
+
+| Variant | PINN | VPINN K = 60 | VPINN K = 120 |
+|---|---|---|---|
+| default (5 000 + 2 000) | 1.6 | 0.49 ± 0.18 | 0.74 |
+| n_quad 256 | 1.6 | 0.54 | 0.70 |
+| 4× budget | 1.1 | 0.24 ± 0.32 (2/3 seeds ≈ 10⁻²) | — |
+| **n_quad 256 + 4× budget** | 1.0 | **1.0 × 10⁻² ± 5 × 10⁻³** (3/3 seeds) | — |
+| λ-ramp 7 → 7.99 (linear in b) | 1.7 | 0.68 | 0.83 |
+| λ-ramp + n_quad 256 + 4× budget | 0.77 | 5.9 × 10⁻² ± 6.8 × 10⁻² | 0.12 |
+
+- For the VPINN, λ = 7.99 is a **budget and quadrature** limit. With 4× the iterations and 256 Gauss points, K = 60 reaches $L^2 = 10^{-2}$ (0.15 % of $\max u$) on all three seeds. The finer quadrature matters because with 128 nodes, $I[u_{\text{exact}}]$ is already wrong by 10⁻³ at this λ (see `tests/test_quadrature.py`).
+- The **PINN stays at $L^2 \approx 1$** with every variant: its limit near the threshold is not the budget.
+- A continuation in λ **does not help**: no gain at λ = 7.9 or 7.99 (equal, or up to 3× worse). This is consistent with E3: the non-local term already provides its own continuation. K = 120 is harder to train than K = 60 at equal budget.
+
+**R7 — Criterion B with only 3 points.** λ\* extrapolated from 3-point windows (step 0.1), mean of 2 seeds:
+
+| Window | [8.0, 8.2] | [8.1, 8.3] | [8.3, 8.5] | [8.6, 8.8] |
+|---|---|---|---|---|
+| VPINN K = 60, ρ_weak | 7.987 | 7.995 | 7.986 | 7.966 |
+| VPINN K = 60, training residual | 7.990 | 8.000 | 7.995 | 7.979 |
+| PINN, ρ_weak | 7.959 | 7.959 | 7.923 | 7.864 |
+| PINN, training residual | 7.992 (fails linearity test) | 8.049 | 8.120 | 8.217 |
+
+Three points within 0.3 of the threshold are enough for the VPINN with K = 60 (error ≤ 0.2 %). The bias grows slowly with distance from the threshold (−0.3 % to −0.4 % for [8.6, 8.8]). The PINN estimates drift strongly with the window.
+
+**R8 — A dynamic signature of the critical point.** Relative growth of $\max u$ over the last 1 000 loss evaluations, median of 2 seeds, on the E2 sweep:
+
+| λ | 7.85 | 7.90 | 7.95 | **8.00** | 8.05 | 8.10 | 8.20 |
+|---|---|---|---|---|---|---|---|
+| VPINN K = 60 | 1 × 10⁻⁵ | 4 × 10⁻⁵ | 3 × 10⁻⁴ | **0.10** | 3 × 10⁻² | 8 × 10⁻⁴ | 2 × 10⁻⁵ |
+| PINN | 4 × 10⁻³ | 3 × 10⁻² | 7 × 10⁻² | **0.11** | 7 × 10⁻² | 5 × 10⁻² | 2 × 10⁻⁴ |
+
+$\max u$ keeps growing at the end of training only **at λ = λ\***, the blow-up case. For λ > 8 the networks settle on a bounded least-squares compromise, so this is **not** a non-existence detector. It does locate the critical value itself, sharply for the VPINN with K = 60 (peak 300× above its level away from 8) and broadly for the PINN. The VPINN with K = 20 is too noisy to use (figure, panel c).
+
+**R9 — Does the spurious-solution threshold depend on network size?** Spurious runs out of 3, VPINN, depth 4:
+
+| width (parameters) | λ = 7.9: K = 15 / 20 / 25 / 30 | λ = 8.3: K = 15 / 20 / 25 / 30 |
+|---|---|---|
+| 16 (865) | 3 / 1 / 0 / 0 | 3 / 1 / 0 / 0 |
+| 32 (3 265) | 3 / 3 / 0 / 0 | 3 / 2 / 0 / 0 |
+| 64 (12 673) | 3 / 3 / **2 / 1** | 3 / 1 / 0 / 0 |
+
+The threshold depends only **weakly** on network size. A 15× larger network shifts it from K ≈ 20–25 to K > 30 at λ = 7.9 and leaves it unchanged at λ = 8.3. Practical rule for this problem: K ≥ 40, and always check ρ_weak.
+
 ---
 
 ## Conclusions
 
 1. **Away from the threshold (λ ≤ 7)** PINN and VPINN are equivalent in $L^2$ (~10⁻⁶). The PINN is slightly better in $H^1$ for λ ≥ 6 and the VPINN better on $I[u]$. The non-local integral, recomputed and differentiated at each iteration, adds no accuracy penalty.
-2. **Near the threshold (λ = 7.9)** a VPINN with a rich enough test space (K ≥ 40) is about 2 orders of magnitude more accurate than the PINN (65× in median, 165× in mean over 5 seeds). With K = 20 it is *worse* than the PINN. At λ = 7.99 all methods fail with this budget.
-3. **The VPINN training loss is not a reliable indicator.** With too few test functions (K ≤ 20 here) it reaches 10⁻¹⁶ for problems that have **no solution** (up to λ ≈ 8.75). This is structural: it is reproduced on 5/5 seeds and survives 4× longer training. Near the threshold the training loss is anti-correlated with accuracy. An a-posteriori residual on an enriched test space ($H^{-1}$ norm, 150 modes) fixes this and costs one evaluation.
-4. **Detecting non-existence:** a residual threshold locates λ\* only to ~0.1 (smooth transition). Linearly extrapolating the post-critical floor of a well-resolved VPINN (K ≥ 60) from 5 points in [8.1, 8.5] gives **λ\* within 0.1 % of 8** for every seed and architecture tested, with a built-in acceptance test (linearity deviation < 5 %). The PINN estimate is equally reproducible but biased by 0.6–0.9 %.
+2. **Near the threshold (λ = 7.9)** a VPINN with a rich enough test space (K ≥ 40) is about 2 orders of magnitude more accurate than the PINN (65× in median, 165× in mean over 5 seeds). With K = 20 it is *worse* than the PINN. At λ = 7.99 all methods fail with the default budget. With 4× the iterations and 256 quadrature points, the VPINN with K = 60 reaches $L^2 = 10^{-2}$ while the PINN stays at ~1.
+3. **The VPINN training loss is not a reliable indicator.** With too few test functions (K ≤ 20 here) it reaches 10⁻¹⁶ for problems that have **no solution** (up to λ ≈ 8.75). This is structural: it is reproduced on 5/5 seeds, survives 4× longer training, and depends only weakly on network size. Near the threshold the training loss is anti-correlated with accuracy. An a-posteriori residual on an enriched test space ($H^{-1}$ norm, 150 modes) fixes this and costs one evaluation.
+4. **Detecting non-existence:** a residual threshold locates λ\* only to ~0.1 (smooth transition). Linearly extrapolating the post-critical floor of a well-resolved VPINN (K ≥ 60) from 5 points in [8.1, 8.5] gives **λ\* within 0.1 % of 8** for every seed and architecture tested, with a built-in acceptance test (linearity deviation < 5 %). Three points within 0.3 of the threshold suffice (error ≤ 0.2 %). The PINN estimate is equally reproducible but biased by 0.6–0.9 %. Separately, a $\max u$ that keeps growing at the end of training marks λ\* itself (blow-up).
 5. **The non-local term acts as a free continuation.** The equivalent local problem ($\mu = \lambda/I^2$) fails for λ ≥ 7.5 with a plain schedule, but converges with an explicit continuation in μ. The local problem is therefore not intrinsically harder: the self-normalising integral provides the continuation automatically.
 
 ### Limitations
 
-- One default training budget. Longer training, learning-rate decay and continuation were tested only for the local problem (R1) and for K = 20 (R2). The failure of every method at λ = 7.99 was not attacked; continuation in λ for the non-local problem, or adaptive sampling, are natural next steps.
+- One default training budget for E1–E4. Longer training, learning-rate decay and continuation were tested only in R1, R2 and R6. Adaptive sampling and other optimisers were not tried; the PINN failure at λ = 7.99 remains open.
 - 2–5 seeds per configuration. The PINN at λ = 7.9 shows a large seed-to-seed spread.
-- The spurious-solution threshold (K between 20 and 30) is specific to this network size and quadrature; it was not mapped for other architectures.
+- The spurious-solution threshold was mapped for depth 4 and widths 16–64 only, with one quadrature (128 nodes).
 - Times are wall-clock times of single-threaded runs executed 10 at a time; use them only for relative comparisons.
 - The linearity behind criterion B is empirical, observed for one non-linearity $f(u) = e^{-u}$ in 1D.
 - The optional 2D extension was not done.
@@ -274,7 +323,7 @@ The phenomenon is **structural**: it is reproducible over seeds and survives 4×
 │   ├── pinn_solver.py       # strong-form loss
 │   ├── vpinn_solver.py      # weak-form loss
 │   ├── run_all.py           # E1–E4: all tables and figures
-│   └── study_robustness.py  # R1–R5 robustness checks (needs run_all.py first)
+│   └── study_robustness.py  # R1–R9 robustness checks (needs run_all.py first)
 ├── tests/
 │   ├── test_exact_solution.py   # sympy residual, λ = 8 sin²(b/2), runaway
 │   └── test_quadrature.py       # Gauss rules, test functions, losses (and options) vanish on the exact solution
@@ -290,7 +339,7 @@ pip install -r requirements.txt
 python -m pytest tests -q              # 43 tests, ~6 s
 cd src
 python run_all.py                      # full benchmark, ~20 min on 10 CPU processes (results/)
-python study_robustness.py             # robustness checks, ~15 min (results/robustness_summary.md)
+python study_robustness.py             # robustness checks R1-R9, ~25 min (results/robustness_summary.md)
 python run_all.py --quick              # short version, ~2 min on 10 processes (results_quick/)
 python run_all.py --only E2 --nproc 4  # one experiment; raw runs are cached in results/raw/
 ```
