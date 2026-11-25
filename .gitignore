@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PyTorch model checkpoints
+*.pth
+
+# Pickle (raw results — regenerate with run_all.py)
+*.pkl
+
+# Logs
+*.log
+
+# Raw training results (regenerate with src/run_all.py) and quick-run outputs
+results/raw/
+results_quick/
+.pytest_cache/
