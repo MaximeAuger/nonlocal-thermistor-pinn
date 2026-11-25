@@ -1,7 +1,7 @@
 """
 Robustness checks of the main claims of run_all.py.
 
-    python study_robustness.py            # ~20 min on 10 CPU processes
+    python study_robustness.py            # ~25 min on 10 CPU processes
     python study_robustness.py --force    # ignore cached runs
 
 R1  Local problem (E3): is the failure for lambda >= 7.5 only a budget issue?
@@ -13,8 +13,13 @@ R3  PINN collocation: Gauss nodes (default) vs uniform / random points.
 R4  Two more seeds (5 in total) at lambda = 7.5 and 7.9 for E1.
 R5  Criterion B (floor extrapolation): per-seed estimates from only 5 points
     lambda in {8.1, ..., 8.5}, other architecture, other K, normalised tests.
+R6  lambda = 7.99: continuation in lambda, finer quadrature, 4x budget.
+R7  Criterion B from 3-point windows at various distances (no new training).
+R8  Growth of max u at the end of training as a marker of lambda* (no new training).
+R9  Spurious-solution threshold in K vs network width.
 
 Outputs: ../results/robustness_summary.md, ../results/fig6_robustness.png,
+../results/fig7_followups.png,
 CSV tables in ../results/robustness/.  Raw runs are cached in ../results/raw/.
 
 Author: Maxime Auger, Dept. of Applied Mechanics, FEMTO-ST Institute, ENSMM
@@ -395,6 +400,251 @@ def plot(r1, r2, r5, args):
     plt.close(fig)
 
 
+# ===================================================================
+# R6 -- continuation in lambda close to the threshold
+# ===================================================================
+
+R6_VARIANTS = {
+    "default": {},
+    "n_quad 256": {"n_quad": 256},
+    "4× budget": {**B4},
+    "n_quad 256 + 4× budget": {"n_quad": 256, **B4},
+    "λ-ramp": {"lam_ramp": 3000},
+    "λ-ramp + n_quad 256": {"lam_ramp": 3000, "n_quad": 256},
+    "λ-ramp + n_quad 256 + 4× budget": {"lam_ramp": 12000, "n_quad": 256, **B4},
+}
+R6_METHODS = {"PINN": pn(), "VPINN K=60": vp(60), "VPINN K=120": vp(120)}
+
+
+R6_BUDGET_ONLY = ("4× budget", "n_quad 256 + 4× budget")   # added afterwards to separate the effects
+
+
+def run_R6(args):
+    jobs = []
+    for vname, extra in R6_VARIANTS.items():
+        if vname in R6_BUDGET_ONLY:
+            continue
+        for mname, base in R6_METHODS.items():
+            for s in range(3):
+                if vname == "default" and mname != "VPINN K=120":
+                    continue            # already in E1
+                jobs.append(with_(base, lam=7.99, seed=s, **extra))
+    jobs += [with_(base, lam=7.9, seed=s, lam_ramp=3000) for base in R6_METHODS.values() for s in range(3)]
+    jobs += [with_(vp(120), lam=7.9, seed=s) for s in range(3)]
+    res = cached("R6_lambda_continuation", jobs, args)
+    jobs = [with_(base, lam=7.99, seed=s, **R6_VARIANTS[v]) for v in R6_BUDGET_ONLY
+            for base in (pn(), vp(60)) for s in range(3)]
+    return res + cached("R6b_budget_only", jobs, args)
+
+
+def r6_variant(r):
+    c = r["config"]
+    for vname in reversed(list(R6_VARIANTS)):
+        ex = R6_VARIANTS[vname]
+        if ex and all(c.get(k) == v for k, v in ex.items()):
+            return vname
+    return "default"
+
+
+def report_R6(res, args):
+    e1 = [r for r in load_raw(args, "E1") if r["config"]["lam"] in (7.9, 7.99) and label_of(r) != "VPINN K=20"]
+    g = group(e1 + res, lambda r: (r["config"]["lam"], label_of(r), r6_variant(r)))
+    md = ["| λ | Method | Variant | L2 (3 seeds) | rel. err. max u | time (s) |", "|---|---|---|---|---|---|"]
+    order = list(R6_VARIANTS)
+    for lam in (7.99, 7.9):
+        for mname in R6_METHODS:
+            for v in order:
+                rs = g.get((lam, mname, v))
+                if not rs:
+                    continue
+                md.append(f"| {lam:g} | {mname} | {v} | {fmt(*ms([r['metrics']['L2'] for r in rs]))} | "
+                          f"{fmt(*ms([r['metrics']['maxu_rel'] for r in rs]))} | "
+                          f"{ms([r['time'] for r in rs])[0]:.0f} |")
+    return "\n".join(md), g, order
+
+
+# ===================================================================
+# R7 -- criterion B with fewer / other points (no new training)
+# ===================================================================
+
+def r7_windows():
+    wins = []
+    for n, step in ((3, 0.05), (3, 0.1), (5, 0.1)):
+        for start in np.round(np.arange(8.0, 9.0 - (n - 1) * step + 1e-9, 0.05), 2):
+            wins.append((n, step, float(start)))
+    return wins
+
+
+def report_R7(args):
+    sweep = [r for r in load_raw(args, "E2_sweep") if label_of(r) in ("PINN", "VPINN K=60")]
+    g = group(sweep, lambda r: (label_of(r), r["config"]["seed"]))
+    out = {}
+    for (name, seed), rs in g.items():
+        lam2r = {round(r["config"]["lam"], 2): r for r in rs}
+        for kind, get in (("ρ_weak", lambda r: r["metrics"]["rho_weak"]),
+                          ("training residual", lambda r: r["history"]["final_rel"])):
+            for (n, step, start) in r7_windows():
+                L = np.round(start + step * np.arange(n), 2)
+                if not all(l in lam2r for l in L):
+                    continue
+                y = np.array([get(lam2r[l]) for l in L])
+                a, b = np.polyfit(L, y, 1)
+                dev = np.max(np.abs(np.polyval([a, b], L) - y)) / y.max()
+                out.setdefault((name, kind, n, step), []).append((start, seed, -b / a, dev))
+    picks = [(3, 0.05, 8.05), (3, 0.1, 8.0), (3, 0.1, 8.1), (3, 0.1, 8.3), (3, 0.1, 8.6),
+             (5, 0.1, 8.0), (5, 0.1, 8.1), (5, 0.1, 8.5)]
+    hdr = " | ".join(f"{n} pts [{s:g}, {s + (n - 1) * st:g}]" for n, st, s in picks)
+    md = [f"| Method | detector | {hdr} |", "|---|---|" + "---|" * len(picks)]
+    for name in ("PINN", "VPINN K=60"):
+        for kind in ("ρ_weak", "training residual"):
+            cells = []
+            for n, st, s in picks:
+                v = [x for x in out.get((name, kind, n, st), []) if abs(x[0] - s) < 1e-9]
+                if not v:
+                    cells.append("—")
+                    continue
+                vals = [x[2] for x in v]
+                flag = "" if max(x[3] for x in v) < LINEAR_TOL else " ✗"
+                cells.append(f"{np.mean(vals):.3f}{flag}")
+            md.append(f"| {name} | {kind} | " + " | ".join(cells) + " |")
+    return "\n".join(md), out
+
+
+# ===================================================================
+# R8 -- dynamic detector: growth of max u at the end of training
+# ===================================================================
+
+def growth(r, last=1000):
+    """Relative growth of max u over the last `last` loss evaluations."""
+    it = np.asarray(r["history"]["log_it"])
+    mu = np.asarray(r["history"]["log_maxu"])
+    if len(it) < 3:
+        return np.nan
+    j = np.searchsorted(it, it[-1] - last)
+    return (mu[-1] - mu[j]) / abs(mu[-1])
+
+
+def report_R8(args):
+    sweep = load_raw(args, "E2_sweep")
+    g = group(sweep, lambda r: (label_of(r), r["config"]["lam"]))
+    lams = sorted({r["config"]["lam"] for r in sweep})
+    curves = {}
+    md = ["| Method | max growth for λ < 7.95 | growth at 7.95 / 7.99 region | min growth for λ ≥ 8 | "
+          "growth at λ = 8.0 / 8.5 / 9.0 |", "|---|---|---|---|---|"]
+    for name in METHODS:
+        gr = [np.median([growth(r) for r in g[(name, l)]]) for l in lams]
+        curves[name] = gr
+        G = dict(zip(lams, gr))
+        below = [G[l] for l in lams if l < 7.95 - 1e-9]
+        above = [G[l] for l in lams if l >= 8.0 - 1e-9]
+        md.append(f"| {name} | {max(below):.2e} | {G.get(7.95, np.nan):.2e} | {min(above):.2e} | "
+                  f"{G.get(8.0, np.nan):.2e} / {G.get(8.5, np.nan):.2e} / {G.get(9.0, np.nan):.2e} |")
+    return "\n".join(md), curves, lams
+
+
+# ===================================================================
+# R9 -- spurious threshold in K vs network width
+# ===================================================================
+
+R9_K = [15, 20, 25, 30]
+R9_W = [16, 32, 64]
+
+
+def n_params(w, d=4):
+    return (1 * w + w) + (d - 1) * (w * w + w) + (w + 1)
+
+
+def run_R9(args):
+    jobs = [with_(vp(K), lam=lam, seed=s, n_hidden=w, n_layers=4)
+            for lam in (7.9, 8.3) for w in R9_W for K in R9_K for s in range(3)]
+    return cached("R9_K_width", jobs, args)
+
+
+def report_R9(res, args):
+    g = group(res, lambda r: (r["config"]["lam"], r["config"]["n_hidden"], r["config"]["n_test"]))
+    md = []
+    grids = {}
+    for lam in (7.9, 8.3):
+        t = [f"| width (params) | " + " | ".join(f"K = {K}" for K in R9_K) + " |", "|---|" + "---|" * len(R9_K)]
+        for w in R9_W:
+            cells = []
+            for K in R9_K:
+                rs = g[(lam, w, K)]
+                n = sum(is_spurious(r) for r in rs)
+                grids[(lam, w, K)] = f"{n}/{len(rs)}"
+                extra = f", L2 {np.median([r['metrics']['L2'] for r in rs]):.0e}" if lam < 8 else ""
+                cells.append((f"**{n}/{len(rs)}**" if n else f"0/{len(rs)}") + extra)
+            t.append(f"| {w} ({n_params(w)}) | " + " | ".join(cells) + " |")
+        md.append(f"λ = {lam:g}\n\n" + "\n".join(t))
+    return "\n\n".join(md), grids
+
+
+def plot_followups(r6, r7, r8, r9, args):
+    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+    # (a) R6
+    ax = axes[0, 0]
+    g6, order6 = r6[1], r6[2]
+    cols = {"PINN": PAL[0], "VPINN K=60": PAL[2], "VPINN K=120": PAL[3]}
+    mks = {"PINN": "o", "VPINN K=60": "^", "VPINN K=120": "D"}
+    for i, m in enumerate(R6_METHODS):
+        for j, v in enumerate(order6):
+            rs = g6.get((7.99, m, v), [])
+            l2 = [r["metrics"]["L2"] for r in rs]
+            ax.scatter(np.full(len(l2), j + (i - 1) * 0.2), l2, color=cols[m], marker=mks[m], s=28,
+                       label=m if j == 0 else None, zorder=3)
+    ax.set_yscale("log")
+    ax.set_xticks(range(len(order6)), [v.replace(" + ", "\n+ ") for v in order6], fontsize=7.5)
+    ax.set_ylabel("L2 error (one point per seed)")
+    ax.set_title("R6 — λ = 7.99 (max u = 6.7, u'(0) = 174)")
+    ax.legend(fontsize=8)
+    # (b) R7: lambda* vs window start, 3-point windows step 0.1
+    ax = axes[0, 1]
+    out7 = r7[1]
+    for name, c in (("PINN", METHODS["PINN"]["color"]), ("VPINN K=60", METHODS["VPINN K=60"]["color"])):
+        for kind, ls, mk in (("ρ_weak", "-", "o"), ("training residual", "--", "s")):
+            v = out7.get((name, kind, 3, 0.1), [])
+            starts = sorted({x[0] for x in v})
+            ys = [np.mean([x[2] for x in v if x[0] == s]) for s in starts]
+            ax.plot(starts, ys, color=c, ls=ls, marker=mk, ms=4, mfc="white" if ls == "--" else c,
+                    label=f"{name} · {'ρ_w' if kind == 'ρ_weak' else 'train'}")
+    ax.axhline(8.0, color="black", lw=1, ls=":")
+    ax.set_ylim(7.7, 8.4)
+    ax.set_xlabel("first λ of the 3-point window (step 0.1)")
+    ax.set_ylabel("extrapolated λ*")
+    ax.set_title("R7 — criterion B from only 3 points")
+    ax.legend(fontsize=7.5)
+    # (c) R8
+    ax = axes[1, 0]
+    curves, lams = r8[1], r8[2]
+    for name, st in METHODS.items():
+        ax.plot(lams, curves[name], color=st["color"], marker=st["marker"], ms=4, label=name)
+    ax.axvline(8.0, color="0.5", lw=1, ls=":")
+    ax.axhline(0, color="0.3", lw=0.8)
+    ax.set_xlabel("λ"); ax.set_ylabel("relative growth of max u, last 1000 evaluations")
+    ax.set_title("R8 — is max u still growing at the end of training?")
+    ax.legend(fontsize=8)
+    # (d) R9 grid at lambda = 8.3
+    ax = axes[1, 1]
+    grids = r9[1]
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap = LinearSegmentedColormap.from_list("seq", ["#f6f5f1", "#eb6834"])
+    rows = [(lam, w) for lam in (7.9, 8.3) for w in R9_W]
+    M = np.array([[int(grids[(lam, w, K)].split("/")[0]) / 3 for K in R9_K] for lam, w in rows])
+    ax.imshow(M, cmap=cmap, vmin=0, vmax=1, aspect="auto")
+    for i, (lam, w) in enumerate(rows):
+        for j, K in enumerate(R9_K):
+            ax.text(j, i, grids[(lam, w, K)], ha="center", va="center", fontsize=9,
+                    color="white" if M[i, j] >= 0.6 else "black")
+    ax.set_xticks(range(len(R9_K)), [f"K = {K}" for K in R9_K])
+    ax.set_yticks(range(len(rows)), [f"λ = {lam:g}, width {w}" for lam, w in rows], fontsize=8)
+    ax.axhline(2.5, color="0.3", lw=1)
+    ax.grid(False)
+    ax.set_title("R9 — spurious VPINN solutions vs K and width (3 seeds)")
+    fig.tight_layout()
+    fig.savefig(os.path.join(args.out, "fig7_followups.png"), bbox_inches="tight")
+    plt.close(fig)
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -415,6 +665,11 @@ def main():
     r4 = report_R4(run_R4(args), args)
     r5 = report_R5(run_R5(args), args)
     plot(r1, r2, r5, args)
+    r6 = report_R6(run_R6(args), args)
+    r7 = report_R7(args)
+    r8 = report_R8(args)
+    r9 = report_R9(run_R9(args), args)
+    plot_followups(r6, r7, r8, r9, args)
     rep = ["# Robustness checks\n",
            f"Default budget {B['n_adam']} Adam + ≤ {B['n_lbfgs']} L-BFGS evaluations; "
            f"'4× budget' = {B4['n_adam']} + {B4['n_lbfgs']}.\n",
@@ -423,7 +678,13 @@ def main():
            f"ρ_weak > {SPURIOUS_VAL:g}); count over seeds, median L2 for λ < 8\n", r2[0], "",
            "## R3 — PINN collocation points (L2, 3 seeds)\n", r3, "",
            "## R4 — 5 seeds at λ = 7.5 and 7.9\n", r4, "",
-           "## R5 — criterion B from 5 points λ ∈ {8.1, …, 8.5}, one estimate per seed\n", r5[0], ""]
+           "## R5 — criterion B from 5 points λ ∈ {8.1, …, 8.5}, one estimate per seed\n", r5[0], "",
+           "## R6 — continuation in λ near the threshold\n", r6[0], "",
+           f"## R7 — criterion B from other windows (mean of 2 seeds; ✗ = a fit fails the "
+           f"{100 * LINEAR_TOL:g}% linearity test)\n", r7[0], "",
+           "## R8 — relative growth of max u over the last 1000 loss evaluations (median of 2 seeds)\n",
+           r8[0], "",
+           "## R9 — spurious VPINN solutions vs K and network width (3 seeds)\n", r9[0], ""]
     with open(os.path.join(args.out, "robustness_summary.md"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(rep))
     print("\n".join(rep))

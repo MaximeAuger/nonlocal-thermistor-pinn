@@ -123,6 +123,8 @@ COMMON_DEFAULTS = {
     "collocation": "gauss",   # PINN residual points: "gauss" (= quadrature nodes), "uniform", "random"
     "n_col": None,            # number of PINN collocation points (default n_quad)
     "mu_ramp": 0,             # local problem only: geometric ramp lambda -> mu over mu_ramp Adam steps
+    "lam_ramp": 0,            # non-local only: ramp lam_start -> lam over lam_ramp Adam steps (linear in b)
+    "lam_start": 7.0,
 }
 
 
@@ -147,6 +149,37 @@ class LocalCoefficient:
             return self.mu
         t = min(1.0, self.it / self.ramp)
         return self.lam * (self.mu / self.lam) ** t
+
+
+class NonlocalLambda:
+    """lambda used in the non-local loss.
+
+    Without ramp: the target lambda.  With cfg["lam_ramp"] = R > 0, lambda is
+    increased from cfg["lam_start"] to the target over the first R Adam steps,
+    linearly in the parameter b = 2 arcsin(sqrt(lambda/8)) (b is the natural
+    coordinate of the solution branch; the ramp slows down close to lambda = 8).
+    """
+
+    def __init__(self, cfg):
+        from exact_solution import b_of_lambda, lambda_of_b, LAMBDA_CRIT
+        self.lam, self.ramp = cfg["lam"], cfg.get("lam_ramp", 0)
+        self.lam0 = cfg.get("lam_start", 7.0)
+        self._lob = lambda_of_b
+        self.by_b = self.lam < LAMBDA_CRIT
+        if self.ramp > 0 and self.by_b:
+            self.b0, self.b1 = b_of_lambda(self.lam0), b_of_lambda(self.lam)
+        self.it = 10 ** 9
+
+    def set_iter(self, it):
+        self.it = it
+
+    def __call__(self):
+        if self.ramp <= 0:
+            return self.lam
+        t = min(1.0, self.it / self.ramp)
+        if self.by_b:
+            return float(self._lob(self.b0 + t * (self.b1 - self.b0)))
+        return self.lam0 + t * (self.lam - self.lam0)
 
 
 def build_net(cfg):

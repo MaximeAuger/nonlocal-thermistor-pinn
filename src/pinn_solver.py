@@ -25,7 +25,7 @@ import numpy as np
 import torch
 
 from utils import (COMMON_DEFAULTS, gauss_legendre, diff, to_t, build_net, train_loop, evaluate,
-                   LocalCoefficient)
+                   LocalCoefficient, NonlocalLambda)
 
 DEFAULT_CONFIG = dict(COMMON_DEFAULTS)
 
@@ -49,9 +49,9 @@ def make_loss(cfg):
     same = cfg.get("collocation", "gauss") == "gauss" and not cfg.get("n_col")
     x = to_t(xq).requires_grad_(True)
     xc = x if same else to_t(collocation_points(cfg)).requires_grad_(True)
-    lam = cfg["lam"]
     local = cfg["problem"] == "local"
     coef_local = LocalCoefficient(cfg) if local else None
+    lam_fn = None if local else NonlocalLambda(cfg)   # optional lambda ramp
 
     def loss_fn(net):
         u = net(x)
@@ -60,7 +60,7 @@ def make_loss(cfg):
         uc = u if same else net(xc)
         u_xx = diff(uc, xc, order=2)
         ec = e if same else torch.exp(-uc)
-        coef = coef_local() if local else lam / I ** 2
+        coef = coef_local() if local else lam_fn() / I ** 2
         s = coef * ec
         r = -u_xx - s
         loss = torch.mean(r ** 2)
@@ -68,8 +68,7 @@ def make_loss(cfg):
             rel = float(torch.sqrt(loss / torch.mean(s ** 2)))
         return loss, {"I": float(I), "rel_res": rel}
 
-    if local:
-        loss_fn.set_iter = coef_local.set_iter
+    loss_fn.set_iter = (coef_local if local else lam_fn).set_iter
     return loss_fn
 
 
