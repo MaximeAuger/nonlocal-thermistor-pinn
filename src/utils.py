@@ -279,7 +279,11 @@ def evaluate(net, lam, n_quad_train=None):
     load = (w * src) @ _EVAL["V"]
     Rw = (w * du) @ _EVAL["dV"] - load
     rho_weak = math.sqrt(np.sum(Rw ** 2) / np.sum(load ** 2))
-    out = {"I_pred": I_pred, "maxu_pred": maxu_pred, "rho_val": rho_val, "rho_weak": rho_weak}
+    energy = Rw ** 2 / np.sum(Rw ** 2)
+    out = {"I_pred": I_pred, "maxu_pred": maxu_pred, "rho_val": rho_val, "rho_weak": rho_weak,
+           # share of the H^{-1} residual energy in mode k=1 (v_1'' = const: a uniform
+           # heat source/sink) and in the modes k > 20
+           "res_mode1_frac": float(energy[0]), "res_modes_gt20_frac": float(energy[20:].sum())}
     if n_quad_train is not None:
         xq, wq = gauss_legendre(n_quad_train)
         with torch.no_grad():

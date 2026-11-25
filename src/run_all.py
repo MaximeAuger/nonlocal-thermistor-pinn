@@ -67,6 +67,7 @@ def settings(quick):
             "E1_lams": [1.0, 4.0, 6.0, 7.0, 7.5, 7.9, 7.99], "E1_seeds": [0, 1, 2],
             "E2_lams": [8.0, 9.0, 12.0], "E2_seeds": [0, 1, 2],
             "sweep_lams": list(np.round(np.arange(7.5, 9.0001, 0.05), 2)), "sweep_seeds": [0, 1],
+            "modes_lams": [8.3, 9.0, 12.0],
             "E3_seeds": [0, 1, 2],
             "E4_lam": 7.9, "E4_seeds": [0, 1],
             "E4_K": [5, 10, 20, 40, 60, 80, 120], "E4_K_lams": [4.0, 7.9],
@@ -78,6 +79,7 @@ def settings(quick):
         "E1_lams": [1.0, 7.0, 7.9], "E1_seeds": [0],
         "E2_lams": [8.0, 9.0], "E2_seeds": [0],
         "sweep_lams": [7.5, 7.75, 8.0, 8.25, 8.5, 8.75, 9.0], "sweep_seeds": [0],
+        "modes_lams": [8.5, 9.0],
         "E3_seeds": [0],
         "E4_lam": 7.9, "E4_seeds": [0],
         "E4_K": [10, 20, 60], "E4_K_lams": [7.9],
@@ -202,7 +204,7 @@ def plot_E1(results, args):
     for name, st in METHODS.items():
         ax.semilogy(x, np.abs(g[(lam_show, name)][0]["metrics"]["u_plot"] - u_exact(x, lam_show)) + 1e-16,
                     color=st["color"], label=name)
-    ax.set_title(f"Pointwise error |u_θ − u|, λ = {lam_show:g}"); ax.set_xlabel("x"); ax.legend()
+    ax.set_ylim(1e-7, 1); ax.set_title(f"Pointwise error |u_θ − u|, λ = {lam_show:g}"); ax.set_xlabel("x"); ax.legend()
     fig.tight_layout()
     fig.savefig(os.path.join(args.out, "fig1_accuracy_vs_lambda.png"), bbox_inches="tight")
     plt.close(fig)
@@ -220,7 +222,9 @@ def run_E2(S, args):
     fixed = cached("E2_fixed", jobs, args)
     jobs = [job(n, lam, s, S["budget"]) for lam in S["sweep_lams"] for n in METHODS for s in S["sweep_seeds"]]
     sweep = cached("E2_sweep", jobs, args)
-    return fixed, sweep
+    jobs = [job(n, lam, 0, S["budget"]) for lam in S["modes_lams"] for n in METHODS]
+    modes = cached("E2_modes", jobs, args)
+    return fixed, sweep, modes
 
 
 def lambda_star(lams, det, tau):
@@ -232,7 +236,22 @@ def lambda_star(lams, det, tau):
     return np.nan
 
 
-def analyse_E2(fixed, sweep, args):
+FIT_WINDOWS = [(8.1, 8.5), (8.2, 8.6), (8.3, 8.7), (8.5, 9.0)]
+
+
+def floor_extrapolation(lams, det, lo, hi):
+    """Fit det ~ a (lambda - lambda*) on [lo, hi] (lambda >= 8 side) and return
+    (lambda*, max relative deviation of the data from the line)."""
+    L, y = np.asarray(lams), np.asarray(det)
+    m = (L >= lo - 1e-9) & (L <= hi + 1e-9)
+    if m.sum() < 3:
+        return np.nan, np.nan
+    a, b = np.polyfit(L[m], y[m], 1)
+    dev = np.max(np.abs(np.polyval([a, b], L[m]) - y[m])) / np.max(y[m])
+    return -b / a, dev
+
+
+def analyse_E2(fixed, sweep, modes, args):
     lines = []
     # --- fixed lambdas: loss floors ---
     g = group(fixed, lambda r: (r["config"]["lam"], label_of(r)))
@@ -275,6 +294,27 @@ def analyse_E2(fixed, sweep, args):
                 cells.append("—" if np.isnan(ls) else (f"≤ {ls:g}" if ls == lams[0] else f"{ls:g}"))
         md.append(f"| {tau:g} | " + " | ".join(cells) + " |")
     lines.append("\n".join(md))
+
+    # --- criterion B: linear extrapolation of the post-critical floor ---
+    md = ["| Method | detector | " + " | ".join(f"fit on [{lo:g}, {hi:g}]" for lo, hi in FIT_WINDOWS) + " |",
+          "|---|---|" + "---|" * len(FIT_WINDOWS)]
+    for n in METHODS:
+        for kind, kname in (("train", "rel. training residual"), ("weak", "ρ_weak")):
+            cells = []
+            for lo, hi in FIT_WINDOWS:
+                ls, dev = floor_extrapolation(lams, det[n][kind], lo, hi)
+                cells.append("—" if np.isnan(ls) else f"{ls:.3f} (dev {100 * dev:.0f}%)")
+            md.append(f"| {n} | {kname} | " + " | ".join(cells) + " |")
+    lines.append("\n".join(md))
+
+    # --- modal content of the a-posteriori residual (lambda > 8) ---
+    md = ["| λ | Method | ρ_weak | energy in mode k=1 (uniform sink) | energy in modes k > 20 |",
+          "|---|---|---|---|---|"]
+    for r in sorted(modes, key=lambda r: (r["config"]["lam"], list(METHODS).index(label_of(r)))):
+        m = r["metrics"]
+        md.append(f"| {r['config']['lam']:g} | {label_of(r)} | {m['rho_weak']:.3e} | "
+                  f"{100 * m['res_mode1_frac']:.1f}% | {100 * m['res_modes_gt20_frac']:.2g}% |")
+    lines.append("\n".join(md))
     return lines, det, lams, star
 
 
@@ -299,7 +339,8 @@ def plot_E2(fixed, det, lams, args):
     fig.savefig(os.path.join(args.out, "fig2_nonexistence_training.png"), bbox_inches="tight")
     plt.close(fig)
 
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.2))
+    fig, axes2 = plt.subplots(2, 2, figsize=(11.5, 8))
+    axes = axes2.ravel()
     for name, st in METHODS.items():
         kw = dict(color=st["color"], marker=st["marker"], ms=4, label=name)
         axes[0].semilogy(lams, det[name]["train"], **kw)
@@ -307,11 +348,28 @@ def plot_E2(fixed, det, lams, args):
         axes[2].plot(lams, det[name]["maxu"], **kw)
     ll = np.linspace(min(lams), min(7.999, max(lams)), 200)
     axes[2].plot(ll, [max_u_exact(l) for l in ll], label="exact max u", **EXACT_KW)
-    titles = ["Final relative training residual", "A-posteriori residual ρ_weak (H⁻¹, K=150)", "max u"]
+    # (d) criterion B: linear extrapolation of rho_weak from the lambda > 8 side
+    lo, hi = FIT_WINDOWS[0]
+    L = np.asarray(lams)
+    for name, st in METHODS.items():
+        m = L >= 8.0 - 1e-9
+        axes[3].plot(L[m], np.asarray(det[name]["weak"])[m], color=st["color"], marker=st["marker"],
+                     ms=4, lw=0, label=name)
+        ls, dev = floor_extrapolation(lams, det[name]["weak"], lo, hi)
+        if not np.isnan(ls) and dev < 0.1:   # only draw fits that are actually linear
+            mm = (L >= lo - 1e-9) & (L <= hi + 1e-9)
+            a, b = np.polyfit(L[mm], np.asarray(det[name]["weak"])[mm], 1)
+            xx = np.linspace(ls, hi, 50)
+            axes[3].plot(xx, a * xx + b, color=st["color"], lw=1.2, ls="--",
+                         label=f"fit → λ* ≈ {ls:.3f}")
+    axes[3].axhline(0, color="0.3", lw=0.8)
+    titles = ["Final relative training residual", "A-posteriori residual ρ_weak (H⁻¹, K=150)", "max u",
+              f"ρ_weak for λ ≥ 8, linear fit on [{lo:g}, {hi:g}]"]
     for ax, t in zip(axes, titles):
         ax.axvline(LAMBDA_CRIT, color="0.5", lw=1, ls=":")
-        ax.set_xlabel("λ"); ax.set_title(t); ax.legend()
+        ax.set_xlabel("λ"); ax.set_title(t); ax.legend(fontsize=7.5)
     axes[2].set_ylim(0, 9)
+    axes[3].set_ylim(-0.01, 0.25)
     fig.tight_layout()
     fig.savefig(os.path.join(args.out, "fig3_lambda_sweep.png"), bbox_inches="tight")
     plt.close(fig)
@@ -324,8 +382,8 @@ def plot_E2(fixed, det, lams, args):
 def table_E3(nonlocal_res, local_res, args):
     gn = group(nonlocal_res, lambda r: (r["config"]["lam"], label_of(r)))
     gl = group(local_res, lambda r: (r["config"]["lam"], label_of(r)))
-    md = ["| λ | μ = λ/I² | Method | L2 non-local | L2 local | ratio NL/L | it. to loss < 1e-3·L0 (NL / L) |",
-          "|---|---|---|---|---|---|---|"]
+    md = ["| λ | μ = λ/I² | Method | L2 non-local | L2 local | ratio NL/L | it. to loss < 1e-3·L0 (NL / L) | status local |",
+          "|---|---|---|---|---|---|---|---|"]
     rows = []
     for (lam, lab) in sorted(gn, key=lambda k: (k[0], list(METHODS).index(k[1]))):
         a = ms([r["metrics"]["L2"] for r in gn[(lam, lab)]])
@@ -341,7 +399,8 @@ def table_E3(nonlocal_res, local_res, args):
 
         ia, ib = it_to(gn[(lam, lab)]), it_to(gl[(lam, lab)])
         md.append(f"| {lam:g} | {mu_local(lam):.3g} | {lab} | {fmt(*a)} | {fmt(*b)} | {a[0] / b[0]:.2f} | "
-                  f"{'—' if np.isnan(ia) else int(ia)} / {'—' if np.isnan(ib) else int(ib)} |")
+                  f"{'—' if np.isnan(ia) else int(ia)} / {'—' if np.isnan(ib) else int(ib)} | "
+                  f"{', '.join(r['status'] for r in gl[(lam, lab)])} |")
         rows.append([lam, mu_local(lam), lab, *a, *b, a[0] / b[0], ia, ib])
     write_csv(os.path.join(args.out, "E3_local_vs_nonlocal.csv"),
               ["lambda", "mu", "method", "L2_nl_mean", "L2_nl_std", "L2_loc_mean", "L2_loc_std",
@@ -443,6 +502,11 @@ def analyse_E4(rK, rA, rQ, args):
                        color=st["color"], marker=st["marker"], label=name)
     axes[2].set_xlabel("Gauss-Legendre points n_quad"); axes[2].set_title(f"Quadrature, λ = {args.E4_lam:g}")
     axes[2].legend()
+    from matplotlib.ticker import NullLocator
+    allK = sorted({k[1] for k in gK})
+    for ax, ticks in ((axes[0], allK), (axes[2], qs)):
+        ax.xaxis.set_minor_locator(NullLocator())
+        ax.set_xticks(ticks, [str(t) for t in ticks])
     for ax in axes[1:]:
         ax.set_ylabel("L2 error")
     fig.tight_layout()
@@ -480,11 +544,14 @@ def main():
         report += ["## E1 — accuracy vs λ\n", table_E1(e1, args), ""]
         plot_E1(e1, args)
     if "E2" in only:
-        fixed, sweep = run_E2(S, args)
-        lines, det, lams, star = analyse_E2(fixed, sweep, args)
+        fixed, sweep, modes = run_E2(S, args)
+        lines, det, lams, star = analyse_E2(fixed, sweep, modes, args)
         report += ["## E2 — λ ≥ 8: loss floors\n", lines[0], "",
-                   "## E2 — λ* seen by each method (smallest λ from which the detector stays > τ)\n",
-                   lines[1], ""]
+                   "## E2 — criterion A: λ* seen by each method (smallest λ from which the detector stays > τ)\n",
+                   lines[1], "",
+                   "## E2 — criterion B: λ* from linear extrapolation of the post-critical residual floor\n",
+                   lines[2], "",
+                   "## E2 — modal content of the a-posteriori residual (seed 0)\n", lines[3], ""]
         plot_E2(fixed, det, lams, args)
     if "E3" in only:
         e3 = run_E1(S, args, problem="local", tag="E3_local")
